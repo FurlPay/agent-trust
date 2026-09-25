@@ -1,7 +1,7 @@
 {
   "name": "@furlpay/agent-trust",
   "version": "0.2.0",
-  "description": "Trusted-Agent-Protocol-aligned trust layer for agentic payments — Ed25519 agent identity, user-signed spend mandates (budget/MCC/expiry/single-use), replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero dependencies.",
+  "description": "Trusted-Agent-Protocol-aligned trust layer for agentic payments — Ed25519 agent identity, user-signed spend mandates (budget/MCC/expiry/single-use), replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero runtime dependencies.",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",

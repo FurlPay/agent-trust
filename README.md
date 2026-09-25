@@ -1,8 +1,8 @@
 # @furlpay/agent-trust
 
-A **Trusted-Agent-Protocol-aligned trust layer for agentic payments**: Ed25519 agent identity, user-signed spend mandates, replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero dependencies.
+A **Trusted-Agent-Protocol-aligned trust layer for agentic payments**: Ed25519 agent identity, user-signed spend mandates, replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero runtime dependencies (`@types/node` is an optional peer, for TypeScript consumers only).
 
-Visa's [Trusted Agent Protocol](https://github.com/visa/trusted-agent-protocol) reached live production transactions in July 2026. Its premise: an agent-initiated payment must carry cryptographic proof of **who** the agent is, **that** the user consented, and **what** the agent is allowed to do. This package implements that trust chain so any FurlPay rail — the [travel MCP server](https://www.npmjs.com/package/@furlpay/travel-mcp), an HTTP API, an x402 facilitator — can gate spend behind it.
+Visa [introduced the Trusted Agent Protocol](https://usa.visa.com/about-visa/newsroom/press-releases.releaseId.21716.html) in October 2025 with Cloudflare and other partners, and has since [reported completing agentic transactions with partners](https://usa.visa.com/about-visa/newsroom/press-releases.releaseId.21961.html) while describing 2026 as the year of mainstream adoption. The [reference implementation](https://github.com/visa/trusted-agent-protocol) describes itself as a sample implementation demonstrating the protocol. Its premise: an agent-initiated payment must carry cryptographic proof of **who** the agent is, **that** the user consented, and **what** the agent is allowed to do. This package implements that trust chain so any FurlPay rail — the [travel MCP server](https://www.npmjs.com/package/@furlpay/travel-mcp), an HTTP API, an x402 facilitator — can gate spend behind it.
 
 ## Status
 
