@@ -4,6 +4,20 @@ A **Trusted-Agent-Protocol-aligned trust layer for agentic payments**: Ed25519 a
 
 Visa's [Trusted Agent Protocol](https://github.com/visa/trusted-agent-protocol) reached live production transactions in July 2026. Its premise: an agent-initiated payment must carry cryptographic proof of **who** the agent is, **that** the user consented, and **what** the agent is allowed to do. This package implements that trust chain so any FurlPay rail — the [travel MCP server](https://www.npmjs.com/package/@furlpay/travel-mcp), an HTTP API, an x402 facilitator — can gate spend behind it.
 
+## Status
+
+**Published on npm: `0.1.0`.**
+
+`0.2.0` is prepared but **not released**. It adds the `/approval` and `/spend`
+entry points, and fixes a packaging bug in which the approval API shipped inside
+the tarball but could not be imported by any published path. Until `0.2.0` is on
+npm, `@furlpay/agent-trust/approval` resolves from the repository, not from an
+installed `0.1.0`.
+
+No third-party security audit has been performed. What exists is the test suite:
+**73 tests, 73 passing, 0 failing**, covering the approval binding, domain
+separation, and each distinct verification failure.
+
 ## Install
 
 ```sh
@@ -120,7 +134,7 @@ import { issueApproval, verifyApproval } from "@furlpay/agent-trust/approval";
 
 // the human approves ONE payment
 const approval = issueApproval({ userPrivateKeyPem, userPublicKeyPem, mandateId, paymentHash });
-// → { payload, signature }   rides as extra.approval on the X-PAYMENT
+// → { payload, signature }   rides as extra.approval on the X-PAYMENT header
 
 const v = verifyApproval(approval, { userPublicKeyPem, paymentHash, mandateId, maxAgeSeconds: 300 });
 // → { ok: true, approvedAtSeconds, userKeyId } | { ok: false, reason }
@@ -140,7 +154,13 @@ Amount, resource, seller and asset are deliberately **absent** — they are alre
 
 Signed by the **user** key, never the agent's: an agent that can mint its own step-up evidence is approving its own above-threshold spending. `maxAgeSeconds` is required with no default, because a default is a security parameter chosen by whoever forgot to set it. Future-dated evidence is refused rather than treated as unusually fresh (60s skew allowed).
 
-Failure reasons stay distinguishable rather than collapsing into one authorization failure: `missing`, `malformed`, `unsupported_version`, `signature_invalid`, `key_mismatch`, `payment_mismatch`, `mandate_mismatch`, `expired`, `future_dated`.
+Failure reasons stay distinguishable rather than collapsing into one authorization failure: `missing`, `malformed`, `unsupported_version`, `signature_invalid`, `key_mismatch`, `payment_mismatch`, `mandate_mismatch`, `expired`, `future_dated`. `missing` and `malformed` are separate on purpose — one means fetch an approval, the other means fix the one you have.
+
+**This is cryptographic evidence carried in the payment, not a transaction.**
+Nothing here touches a chain: `issueApproval` produces a detached Ed25519
+signature, `verifyApproval` checks it, and the result is an input to whatever
+decides whether a payment may settle. The enforcement half lives in
+[`@furlpay/x402-guard`](https://github.com/FurlPay/x402-guard).
 
 The enforcement half — window budgets, atomic reservation, the policy evaluator — lives in [`@furlpay/x402-guard`](https://github.com/FurlPay/x402-guard).
 
