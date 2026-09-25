@@ -57,5 +57,13 @@
   "devDependencies": {
     "typescript": "5.5.3",
     "@types/node": "20.14.10"
+  },
+  "peerDependencies": {
+    "@types/node": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "@types/node": {
+      "optional": true
+    }
   }
 }
