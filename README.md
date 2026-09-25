@@ -1,9 +1,5 @@
 # @furlpay/agent-trust
 
-![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)
-![Node.js](https://img.shields.io/badge/Node.js-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white)
-![Zero dependencies](https://img.shields.io/badge/Zero%20dependencies-4C1?style=flat-square)
-
 A **Trusted-Agent-Protocol-aligned trust layer for agentic payments**: Ed25519 agent identity, user-signed spend mandates, replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero dependencies.
 
 Visa's [Trusted Agent Protocol](https://github.com/visa/trusted-agent-protocol) reached live production transactions in July 2026. Its premise: an agent-initiated payment must carry cryptographic proof of **who** the agent is, **that** the user consented, and **what** the agent is allowed to do. This package implements that trust chain so any FurlPay rail — the [travel MCP server](https://www.npmjs.com/package/@furlpay/travel-mcp), an HTTP API, an x402 facilitator — can gate spend behind it.
@@ -90,6 +86,41 @@ const headers = signRequest({ method: "POST", url, body, keyId: agent.keyId, pri
 const { keyId } = verifyRequest({ method: "POST", url, body, headers, resolvePublicKey });
 ```
 
+## Step-up approval evidence
+
+A mandate can say "above $5, a human must approve". A facilitator cannot act on that by asking anyone — by settlement time the approval either happened or it did not, and its only moves are settle and refuse. So the threshold is enforceable only if the payment **arrives carrying proof**.
+
+AP2 expresses this structurally (a closed mandate signed on a Trusted Surface vs. an open one closed by the agent), but that presumes AP2 envelopes on both ends. Most x402 traffic has none. The minimum that works without them is two base64url strings in the `extra` field x402 already carries:
+
+```ts
+import { issueApproval, verifyApproval } from "@furlpay/agent-trust/approval";
+
+// the human approves ONE payment
+const approval = issueApproval({ userPrivateKeyPem, userPublicKeyPem, mandateId, paymentHash });
+// → { payload, signature }   rides as extra.approval on the X-PAYMENT
+
+const v = verifyApproval(approval, { userPublicKeyPem, paymentHash, mandateId, maxAgeSeconds: 300 });
+// → { ok: true, approvedAtSeconds, userKeyId } | { ok: false, reason }
+```
+
+The signature covers `paymentHash`, `mandateId`, `keyId` and `approvedAt`, under the domain `x402-approval/v1`. Each earns its place by what breaks without it:
+
+| Field | Without it |
+|---|---|
+| `paymentHash` | proves only that the user approved *something*, once — a replay proves that equally well, forever |
+| `mandateId` | evidence minted under a $50 mandate works under a $5000 one |
+| `keyId` | a valid signature from an unrelated user's key passes |
+| `approvedAt` | one approval authorizes above-threshold payments indefinitely |
+| domain | a signature over the same bytes can be reinterpreted as another signed object type |
+
+Amount, resource, seller and asset are deliberately **absent** — they are already committed by `paymentHash`, and a second copy is one that can disagree.
+
+Signed by the **user** key, never the agent's: an agent that can mint its own step-up evidence is approving its own above-threshold spending. `maxAgeSeconds` is required with no default, because a default is a security parameter chosen by whoever forgot to set it. Future-dated evidence is refused rather than treated as unusually fresh (60s skew allowed).
+
+Failure reasons stay distinguishable rather than collapsing into one authorization failure: `missing`, `malformed`, `unsupported_version`, `signature_invalid`, `key_mismatch`, `payment_mismatch`, `mandate_mismatch`, `expired`, `future_dated`.
+
+The enforcement half — window budgets, atomic reservation, the policy evaluator — lives in [`@furlpay/x402-guard`](https://github.com/FurlPay/x402-guard).
+
 ## API
 
 | Export | Purpose |
@@ -98,8 +129,19 @@ const { keyId } = verifyRequest({ method: "POST", url, body, headers, resolvePub
 | `issueMandate(params)` | User signs constraints binding one agent key |
 | `verifyMandate(sm, userPem)` | Decode + verify a signed mandate |
 | `createBookingToken(params)` | Agent wraps the mandate around one signed intent (fresh nonce) |
-| `AgentTrust` | Stateful verifier: key registry, budget decrement, single-use consumption, replay set |
+| `mintCapability(params)` | Agent mints a single-use, audience-bound capability for one tool-server call |
+| `AgentTrust` | Stateful verifier: key registry, budget decrement, single-use consumption, replay set. `verifyBookingToken` (spend) + `verifyCapability` (tool-server access) |
 | `signRequest` / `verifyRequest` | RFC 9421 HTTP message signatures |
+
+## Capability tokens (tool-server tier)
+
+The mandate says *what* an agent may spend; a **capability** says *which* tool-server it may call, for *how long*, and exactly *once*. `mintCapability` produces a short-lived, `audience`-restricted token the agent presents per call; `AgentTrust.verifyCapability(token, { audience, action, presenterKeyId })` accepts it only when:
+
+- the `audience` equals **this** server's id (a token leaked from one tool-server can't be replayed at another),
+- the `presenterKeyId` — the agent key that authenticated the request (e.g. the `keyid` returned by `verifyRequest`) — is the **same key that minted the token** (proof-of-possession; a stolen token is useless to another holder),
+- it hasn't expired, its `action` matches, its `maxUsd` is within the server ceiling, and its `jti` hasn't been burned (single-use via the same `NonceStore`).
+
+Together with `signRequest`/`verifyRequest`, this is the multi-tier chain: **mandate** (user consent + budget) → **request signature** (who is calling now) → **capability** (this call, this server, once).
 | `NonceStore` | Pluggable replay store (in-memory default; back with Redis `SETNX` across instances) |
 
 ## Security model

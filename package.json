@@ -1,21 +1,25 @@
 {
   "name": "@furlpay/agent-trust",
   "version": "0.1.0",
-  "description": "Trusted-Agent-Protocol-aligned trust layer for agentic payments — Ed25519 agent identity, user-signed spend mandates (budget/MCC/expiry/single-use), replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero dependencies.",
+  "description": "Trusted-Agent-Protocol-aligned trust layer for agentic payments \u2014 Ed25519 agent identity, user-signed spend mandates (budget/MCC/expiry/single-use), replay-safe booking tokens, and RFC 9421 HTTP message signatures. Zero dependencies.",
   "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "files": ["dist", "src"],
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
     }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "npm run build && node --test"
+    "prepare": "npm run build",
+    "test": "npm run build && node --test dist/tests/spend.test.js test/agent-trust.test.js test/approval.test.js"
   },
   "keywords": [
     "trusted-agent-protocol",
@@ -29,10 +33,17 @@
     "virtual-cards",
     "furlpay"
   ],
-  "repository": { "type": "git", "url": "https://github.com/furlpay/agent-trust" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/furlpay/agent-trust"
+  },
   "homepage": "https://furlpay.com",
-  "engines": { "node": ">=18" },
-  "publishConfig": { "access": "public" },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "typescript": "5.5.3",
     "@types/node": "20.14.10"
