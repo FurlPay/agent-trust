@@ -6,10 +6,11 @@ import {
   generateKeypair,
   issueMandate,
   keyIdOf,
+  mintCapability,
   signRequest,
   verifyMandate,
   verifyRequest,
-} from "../dist/index.js";
+} from "../dist/src/index.js";
 
 const HOUR = 3600 * 1000;
 const inOneHour = () => new Date(Date.now() + HOUR).toISOString();
@@ -246,4 +247,136 @@ test("unknown keyid is rejected", () => {
     () => verifyRequest({ method: "POST", url, body: "", headers, resolvePublicKey: () => undefined }),
     /unknown keyid/,
   );
+});
+
+// ── capability tokens (single-use, audience-bound, PoP) ─────────────────────
+
+function capSetup() {
+  const agent = generateKeypair("agent");
+  const trust = new AgentTrust();
+  trust.registerAgent(agent.publicKeyPem);
+  const mint = (over = {}) =>
+    mintCapability({
+      agentPrivateKeyPem: agent.privateKeyPem,
+      agentPublicKeyPem: agent.publicKeyPem,
+      audience: "https://travel-mcp.furlpay.com",
+      action: "pay:travala",
+      ...over,
+    });
+  return { agent, trust, mint };
+}
+
+test("capability: valid token at the right audience clears once", async () => {
+  const { agent, trust, mint } = capSetup();
+  const tok = mint();
+  const d = await trust.verifyCapability(tok, {
+    audience: "https://travel-mcp.furlpay.com",
+    action: "pay:travala",
+    presenterKeyId: agent.keyId,
+  });
+  assert.equal(d.ok, true);
+  assert.equal(d.agentKeyId, agent.keyId);
+  assert.equal(d.audience, "https://travel-mcp.furlpay.com");
+});
+
+test("capability: single-use — a replay is rejected", async () => {
+  const { agent, trust, mint } = capSetup();
+  const tok = mint();
+  const opts = { audience: "https://travel-mcp.furlpay.com", presenterKeyId: agent.keyId };
+  assert.equal((await trust.verifyCapability(tok, opts)).ok, true);
+  const replay = await trust.verifyCapability(tok, opts);
+  assert.equal(replay.ok, false);
+  assert.match(replay.reason, /replay/);
+});
+
+test("capability: wrong audience is rejected (no cross-server replay)", async () => {
+  const { agent, trust, mint } = capSetup();
+  const tok = mint();
+  const d = await trust.verifyCapability(tok, {
+    audience: "https://payments.furlpay.com",
+    presenterKeyId: agent.keyId,
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /audience/);
+});
+
+test("capability: proof-of-possession — a different presenter key is rejected", async () => {
+  const { agent, trust, mint } = capSetup();
+  const other = generateKeypair("agent");
+  const tok = mint();
+  const d = await trust.verifyCapability(tok, {
+    audience: "https://travel-mcp.furlpay.com",
+    presenterKeyId: other.keyId,
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /different key/);
+});
+
+test("capability: action mismatch is rejected", async () => {
+  const { agent, trust, mint } = capSetup();
+  const tok = mint({ action: "wallet.read" });
+  const d = await trust.verifyCapability(tok, {
+    audience: "https://travel-mcp.furlpay.com",
+    action: "pay:travala",
+    presenterKeyId: agent.keyId,
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /action/);
+});
+
+test("capability: expired token is rejected", async () => {
+  const { agent, trust, mint } = capSetup();
+  const tok = mint({ ttlSeconds: -1 });
+  const d = await trust.verifyCapability(tok, {
+    audience: "https://travel-mcp.furlpay.com",
+    presenterKeyId: agent.keyId,
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /expired/);
+});
+
+test("capability: unregistered agent key is rejected", async () => {
+  const { mint } = capSetup();
+  const strangerTrust = new AgentTrust();
+  const tok = mint();
+  const d = await strangerTrust.verifyCapability(tok, {
+    audience: "https://travel-mcp.furlpay.com",
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /unknown agent key/);
+});
+
+test("capability: server value ceiling overrides a larger token maxUsd", async () => {
+  const { agent, trust, mint } = capSetup();
+  const tok = mint({ maxUsd: 5000 });
+  const d = await trust.verifyCapability(tok, {
+    audience: "https://travel-mcp.furlpay.com",
+    presenterKeyId: agent.keyId,
+    maxUsd: 1000,
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /ceiling/);
+});
+
+test("capability: tampered payload fails the signature check", async () => {
+  const { agent, trust } = capSetup();
+  const tok = mintCapability({
+    agentPrivateKeyPem: agent.privateKeyPem,
+    agentPublicKeyPem: agent.publicKeyPem,
+    audience: "https://travel-mcp.furlpay.com",
+    action: "pay:travala",
+    maxUsd: 100,
+  });
+  // Flip a byte in the inner payload, re-encode the outer token.
+  const outer = JSON.parse(Buffer.from(tok, "base64url").toString());
+  const grant = JSON.parse(Buffer.from(outer.payload, "base64url").toString());
+  grant.maxUsd = 999999;
+  outer.payload = Buffer.from(JSON.stringify(grant)).toString("base64url");
+  const tampered = Buffer.from(JSON.stringify(outer)).toString("base64url");
+  const d = await trust.verifyCapability(tampered, {
+    audience: "https://travel-mcp.furlpay.com",
+    presenterKeyId: agent.keyId,
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.reason, /signature invalid/);
 });

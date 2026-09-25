@@ -219,6 +219,86 @@ function decodeMandatePayload(sm: SignedMandate): Mandate {
   return JSON.parse(Buffer.from(sm.payload, "base64url").toString()) as Mandate;
 }
 
+// ── capability tokens: single-use, audience-bound tool-server grants ─────────
+//
+// The mandate says WHAT an agent may spend; a capability says WHICH tool-server
+// it may call, for HOW LONG, and exactly ONCE. This is the third tier of the
+// multi-tier session model: a short-lived, audience-restricted token the agent
+// mints per tool-server call. It is proof-of-possession bound — valid only when
+// presented by the same agent key that minted it (the caller must independently
+// authenticate that key, e.g. via signRequest/verifyRequest) — so an
+// intercepted token cannot be replayed by a different holder or against a
+// different audience. Single-use via the same nonce store that guards bookings.
+
+export interface CapabilityGrant {
+  v: 1;
+  jti: string;
+  /** Agent key that minted AND must present this token (PoP binding). */
+  agentKeyId: string;
+  /** The ONE tool-server / resource this token authorizes (e.g. a URL or id). */
+  audience: string;
+  /** Scope of what may be done at the audience (e.g. "wallet.read", "pay:travala"). */
+  action: string;
+  /** Optional link to the spend mandate this capability acts under. */
+  mandateId?: string;
+  /** Optional per-call USD ceiling for value-moving actions. */
+  maxUsd?: number;
+  iat: string;
+  /** Short expiry — capabilities are minted per call, not held. */
+  exp: string;
+}
+
+export interface SignedCapability {
+  payload: string; // base64url(JSON CapabilityGrant)
+  signature: string; // agent signature over payload
+}
+
+export interface MintCapabilityParams {
+  agentPrivateKeyPem: string;
+  agentPublicKeyPem: string;
+  audience: string;
+  action: string;
+  mandateId?: string;
+  maxUsd?: number;
+  /** Token lifetime in seconds. Default 120. */
+  ttlSeconds?: number;
+}
+
+/** Agent mints a single-use, audience-bound capability for one tool-server call. */
+export function mintCapability(p: MintCapabilityParams): string {
+  if (!p.audience) throw new Error("audience is required");
+  if (!p.action) throw new Error("action is required");
+  const now = Date.now();
+  const grant: CapabilityGrant = {
+    v: 1,
+    jti: "cap_" + b64url(crypto.randomBytes(16)),
+    agentKeyId: spkiFingerprint(p.agentPublicKeyPem, "agent"),
+    audience: p.audience,
+    action: p.action,
+    mandateId: p.mandateId,
+    maxUsd: p.maxUsd,
+    iat: new Date(now).toISOString(),
+    exp: new Date(now + (p.ttlSeconds ?? 120) * 1000).toISOString(),
+  };
+  const payload = b64url(Buffer.from(JSON.stringify(grant)));
+  const token: SignedCapability = {
+    payload,
+    signature: b64url(signBytes(Buffer.from(payload), p.agentPrivateKeyPem)),
+  };
+  return b64url(Buffer.from(JSON.stringify(token)));
+}
+
+export interface CapabilityDecision {
+  ok: boolean;
+  reason?: string;
+  agentKeyId?: string;
+  jti?: string;
+  audience?: string;
+  action?: string;
+  mandateId?: string;
+  maxUsd?: number;
+}
+
 // ── verifier ────────────────────────────────────────────────────────────────
 
 export interface TrustDecision {
@@ -387,6 +467,89 @@ export class AgentTrust {
       remainingUsd: Math.round((c.maxTotalUsd - spent - claims.amountUsd) * 100) / 100,
     };
   }
+
+  /**
+   * Verify a single-use capability token at a tool-server.
+   *
+   * `expect.audience` MUST be this server's own id — a token minted for another
+   * audience is rejected, so a capability leaked from one tool-server can't be
+   * replayed at another. `expect.presenterKeyId` is the agent key that
+   * authenticated THIS request (e.g. the keyid from verifyRequest); it must
+   * equal the key that minted the token — the proof-of-possession check that
+   * stops a stolen token from being used by a different holder. The jti burns
+   * on first success, so the token clears exactly once.
+   */
+  async verifyCapability(
+    tokenB64: string,
+    expect: {
+      audience: string;
+      action?: string;
+      presenterKeyId?: string;
+      /** Reject value-moving calls above this ceiling even if the token allows more. */
+      maxUsd?: number;
+      maxSkewSeconds?: number;
+    },
+  ): Promise<CapabilityDecision> {
+    let token: SignedCapability;
+    let grant: CapabilityGrant;
+    try {
+      token = JSON.parse(Buffer.from(tokenB64, "base64url").toString()) as SignedCapability;
+      grant = JSON.parse(Buffer.from(token.payload, "base64url").toString()) as CapabilityGrant;
+    } catch {
+      return { ok: false, reason: "malformed capability token" };
+    }
+    if (grant.v !== 1) return { ok: false, reason: `unsupported capability version ${grant.v}` };
+
+    // 1. Minter identity: registered agent key that really signed this grant.
+    const agentPem = this.agents.get(grant.agentKeyId);
+    if (!agentPem) return { ok: false, reason: `unknown agent key ${grant.agentKeyId}` };
+    if (!verifyBytes(Buffer.from(token.payload), Buffer.from(token.signature, "base64url"), agentPem)) {
+      return { ok: false, reason: "capability signature invalid" };
+    }
+
+    // 2. Proof-of-possession: presenter must be the key the token was minted for.
+    if (expect.presenterKeyId && expect.presenterKeyId !== grant.agentKeyId) {
+      return { ok: false, reason: "capability presented by a different key than it was minted for" };
+    }
+
+    // 3. Audience + action binding.
+    if (grant.audience !== expect.audience) {
+      return { ok: false, reason: `capability audience ${grant.audience} does not match this server` };
+    }
+    if (expect.action && grant.action !== expect.action) {
+      return { ok: false, reason: `capability action ${grant.action} does not grant ${expect.action}` };
+    }
+
+    // 4. Freshness.
+    const now = Date.now();
+    const exp = Date.parse(grant.exp);
+    if (Number.isNaN(exp) || now > exp) return { ok: false, reason: "capability expired" };
+    const iat = Date.parse(grant.iat);
+    const skewMs = (expect.maxSkewSeconds ?? 300) * 1000;
+    if (Number.isNaN(iat) || iat - now > skewMs) return { ok: false, reason: "capability iat out of range" };
+
+    // 5. Value ceiling.
+    if (expect.maxUsd != null && grant.maxUsd != null && grant.maxUsd > expect.maxUsd) {
+      return { ok: false, reason: `capability maxUsd $${grant.maxUsd} exceeds server ceiling $${expect.maxUsd}` };
+    }
+
+    // 6. Replay check (report before the burn so the reason names the attack).
+    if (this.nonces.has && (await this.nonces.has(grant.jti))) {
+      return { ok: false, reason: "replayed capability token" };
+    }
+    // 7. Single-use burn — clears exactly once.
+    if (!(await this.nonces.add(grant.jti))) return { ok: false, reason: "replayed capability token" };
+
+    return {
+      ok: true,
+      agentKeyId: grant.agentKeyId,
+      jti: grant.jti,
+      audience: grant.audience,
+      action: grant.action,
+      mandateId: grant.mandateId,
+      maxUsd: grant.maxUsd,
+    };
+  }
 }
 
 // ── RFC 9421 HTTP Message Signatures (TAP transport binding) ────────────────
@@ -498,3 +661,26 @@ export function verifyRequest(p: VerifyRequestParams): VerifiedRequest {
   }
   return { keyId, tag: param("tag"), nonce: param("nonce"), created, expires };
 }
+
+// ── Per-request spend policy ───────────────────────────────────────────────
+//
+// Separate from the mandate system above, and deliberately so. A mandate
+// governs BOOKINGS — a signed allowance spent on discrete purchases. An agent
+// paying an API per request is the opposite shape: thousands of sub-cent calls
+// with no per-call human intent, where the operator's question is rate, not
+// authorisation. See ./spend.ts.
+export {
+  MICROS_PER_UNIT,
+  SpendLimiter,
+  authorize,
+  formatMicros,
+  priceFor,
+  toMicros,
+  type DenialReason,
+  type EndpointPrices,
+  type Micros,
+  type Reservation,
+  type SpendDecision,
+  type SpendLimiterOptions,
+  type SpendPolicy,
+} from "./spend.js";
