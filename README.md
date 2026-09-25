@@ -4,6 +4,29 @@ A **Trusted-Agent-Protocol-aligned trust layer for agentic payments**: Ed25519 a
 
 Visa's [Trusted Agent Protocol](https://github.com/visa/trusted-agent-protocol) reached live production transactions in July 2026. Its premise: an agent-initiated payment must carry cryptographic proof of **who** the agent is, **that** the user consented, and **what** the agent is allowed to do. This package implements that trust chain so any FurlPay rail — the [travel MCP server](https://www.npmjs.com/package/@furlpay/travel-mcp), an HTTP API, an x402 facilitator — can gate spend behind it.
 
+## Install
+
+```sh
+npm install @furlpay/agent-trust
+```
+
+**Mind the scope.** An unrelated package is published under the unscoped name
+`agent-trust`; it is not this project and is not maintained by us. Always install
+the `@furlpay/` scoped name.
+
+ESM only (`"type": "module"`) — `require()` will fail with
+`ERR_PACKAGE_PATH_NOT_EXPORTED`. Node 18+. TypeScript consumers should have
+`@types/node` installed (`Buffer` is in the public type surface); it is declared
+as an optional peer.
+
+### Entry points
+
+| Import | Contains |
+|---|---|
+| `@furlpay/agent-trust` | identity, mandates, booking tokens, RFC 9421 signing |
+| `@furlpay/agent-trust/approval` | `issueApproval`, `verifyApproval`, `APPROVAL_SIGNING_DOMAIN` |
+| `@furlpay/agent-trust/spend` | spend-tracking helpers |
+
 ## The trust chain
 
 ```
