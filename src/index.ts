@@ -2,8 +2,12 @@
 // @furlpay/agent-trust — a Trusted-Agent-Protocol-aligned trust layer for
 // agentic payments.
 //
-// Visa's Trusted Agent Protocol (TAP, github.com/visa/trusted-agent-protocol)
-// moved to live production transactions in July 2026. Its core idea: every
+// Visa introduced the Trusted Agent Protocol (TAP,
+// github.com/visa/trusted-agent-protocol) in October 2025 with Cloudflare and
+// other partners. This comment previously said TAP "moved to live production
+// transactions in July 2026" — a claim the linked repository does not support
+// (it describes itself as a sample implementation) and which was wrong about
+// the date by roughly nine months. Its core idea: every
 // agent-initiated request carries a cryptographic proof of (1) WHO the agent
 // is, (2) THAT the user consented, and (3) WHAT the agent is allowed to do —
 // transmitted as RFC 9421 HTTP Message Signatures so merchants can separate
@@ -38,7 +42,8 @@
 // decremented on successful verification, so a mandate is a spend allowance,
 // not a reusable password.
 //
-// Zero dependencies — Ed25519 via node:crypto. The nonce/budget stores are
+// No runtime dependencies — Ed25519 via node:crypto. (`@types/node` is an
+// optional peer, for TypeScript consumers only.) The nonce/budget stores are
 // in-memory and correct within one process; back them with Redis for
 // multi-instance verifiers.
 // ---------------------------------------------------------------------------
@@ -90,6 +95,52 @@ function verifyBytes(data: Buffer, signature: Buffer, publicKeyPem: string): boo
   }
 }
 
+// ── money: exact USD, never float arithmetic ────────────────────────────────
+//
+// Mandate amounts travel as JSON numbers (the signed v1 format), but no spend
+// decision is made on them as floats. `0.1 + 0.2 > 0.3` is true in IEEE-754,
+// which refused a user with a $0.30 cap who had spent $0.10 a legitimate
+// $0.20 booking. Every amount is converted to integer micro-dollars (bigint)
+// before it is compared or accumulated.
+//
+// The conversion reads the number's shortest decimal form, which for up to 15
+// significant digits is exactly the literal that was signed: `0.30` in the
+// payload parses to a double whose shortest form is "0.3", i.e. 300000 micros.
+// Anything that cannot be read back exactly is REFUSED, never rounded: more
+// than 6 decimal places, exponent forms, non-finite or negative values, and
+// amounts at or above $1e9 (past which 15 significant digits no longer cover
+// 6 decimal places). Rounding would change the amount a user authorized.
+
+const MICROS_PER_USD = 1_000_000n;
+/** Exclusive upper bound, in USD, for any amount this library will reason about. */
+const MAX_USD = 1_000_000_000;
+
+/** Integer micro-dollars for a USD amount, or null if it is not exactly representable. */
+function usdToMicros(value: unknown): bigint | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value >= MAX_USD) return null;
+  const text = String(value);
+  const m = /^(\d+)(?:\.(\d{1,6}))?$/.exec(text);
+  if (!m) return null;
+  return BigInt(m[1]) * MICROS_PER_USD + BigInt((m[2] ?? "").padEnd(6, "0"));
+}
+
+/** "0.2" → "0.20", "0.123456" stays: cents always, sub-cent digits only when present. */
+function formatMicros(micros: bigint): string {
+  const sign = micros < 0n ? "-" : "";
+  const abs = micros < 0n ? -micros : micros;
+  const frac = (abs % MICROS_PER_USD).toString().padStart(6, "0").replace(/0{1,4}$/, "");
+  return `${sign}${abs / MICROS_PER_USD}.${frac.padEnd(2, "0")}`;
+}
+
+function requireUsd(value: unknown, field: string, { positive }: { positive: boolean }): bigint {
+  const micros = usdToMicros(value);
+  if (micros === null) {
+    throw new Error(`${field} must be a USD amount below ${MAX_USD} with at most 6 decimal places`);
+  }
+  if (positive && micros <= 0n) throw new Error(`${field} must be > 0`);
+  return micros;
+}
+
 // ── mandates: user-signed consent ───────────────────────────────────────────
 
 export interface MandateConstraints {
@@ -133,7 +184,11 @@ export interface IssueMandateParams {
 
 /** User grants an agent a spend mandate by signing the constraint payload. */
 export function issueMandate(p: IssueMandateParams): SignedMandate {
-  if (p.constraints.maxTotalUsd <= 0) throw new Error("maxTotalUsd must be > 0");
+  // Refuse a cap the verifier could not read back exactly, rather than sign it.
+  requireUsd(p.constraints.maxTotalUsd, "maxTotalUsd", { positive: true });
+  if (p.constraints.maxPerBookingUsd !== undefined) {
+    requireUsd(p.constraints.maxPerBookingUsd, "maxPerBookingUsd", { positive: true });
+  }
   if (Number.isNaN(Date.parse(p.constraints.expiresAt))) throw new Error("expiresAt must be ISO 8601");
   const mandate: Mandate = {
     v: 1,
@@ -199,6 +254,7 @@ export interface CreateBookingTokenParams {
 
 /** Agent wraps a mandate around one concrete booking intent. */
 export function createBookingToken(p: CreateBookingTokenParams): string {
+  requireUsd(p.intent.amountUsd, "amountUsd", { positive: true });
   const envelope: IntentEnvelope = {
     ...p.intent,
     mandateId: decodeMandatePayload(p.mandate).mandateId,
@@ -268,6 +324,7 @@ export interface MintCapabilityParams {
 export function mintCapability(p: MintCapabilityParams): string {
   if (!p.audience) throw new Error("audience is required");
   if (!p.action) throw new Error("action is required");
+  if (p.maxUsd !== undefined) requireUsd(p.maxUsd, "maxUsd", { positive: false });
   const now = Date.now();
   const grant: CapabilityGrant = {
     v: 1,
@@ -308,6 +365,8 @@ export interface TrustDecision {
   mandateId?: string;
   /** USD allowance left on the mandate after this booking. */
   remainingUsd?: number;
+  /** The same allowance as an exact decimal string ("0.20"), for display. */
+  remainingUsdExact?: string;
 }
 
 /** Pluggable stores; in-memory defaults are correct within one process. */
@@ -349,7 +408,10 @@ export interface AgentTrustOptions {
 export class AgentTrust {
   private readonly users = new Map<string, string>(); // userKeyId → pem
   private readonly agents = new Map<string, string>(); // agentKeyId → pem
-  private readonly spent = new Map<string, number>(); // mandateId → USD spent
+  // mandateId → micro-dollars spent. Process-local: two AgentTrust instances
+  // (or two servers) each keep their own, so a mandate's cap holds per
+  // instance, not across a fleet. Route one mandate to one verifier.
+  private readonly spent = new Map<string, bigint>();
   private readonly consumed = new Set<string>(); // exhausted single-use mandates
   private readonly nonces: NonceStore;
   private readonly maxSkewMs: number;
@@ -414,7 +476,12 @@ export class AgentTrust {
     }
 
     // 3. The signed intent must match what the rail is about to execute.
-    if (envelope.amountUsd !== claims.amountUsd) return { ok: false, reason: "amount does not match signed intent" };
+    const signedMicros = usdToMicros(envelope.amountUsd);
+    const claimedMicros = usdToMicros(claims.amountUsd);
+    if (signedMicros === null || claimedMicros === null) {
+      return { ok: false, reason: `amount must be a USD amount below ${MAX_USD} with at most 6 decimal places` };
+    }
+    if (signedMicros !== claimedMicros) return { ok: false, reason: "amount does not match signed intent" };
     if (envelope.source !== claims.source) return { ok: false, reason: "source does not match signed intent" };
     if ((envelope.mcc ?? undefined) !== (claims.mcc ?? undefined)) {
       return { ok: false, reason: "mcc does not match signed intent" };
@@ -426,7 +493,10 @@ export class AgentTrust {
       return { ok: false, reason: "replayed booking token" };
     }
 
-    // 5. Constraints.
+    // 5. Constraints. NO `await` FROM HERE TO THE RESERVATION BELOW: the
+    //    budget and single-use checks and the writes that act on them must
+    //    happen in one synchronous run, or two concurrent bookings both read
+    //    the same `spent` and both pass a cap meant to stop the second.
     const c = mandate.constraints;
     const now = Date.now();
     if (now > Date.parse(c.expiresAt)) return { ok: false, reason: "mandate expired" };
@@ -435,14 +505,27 @@ export class AgentTrust {
       return { ok: false, reason: "intent createdAt out of range" };
     }
     if (this.consumed.has(mandate.mandateId)) return { ok: false, reason: "single-use mandate already consumed" };
-    if (claims.amountUsd <= 0) return { ok: false, reason: "amount must be > 0" };
-    const perBooking = c.maxPerBookingUsd ?? c.maxTotalUsd;
-    if (claims.amountUsd > perBooking) {
-      return { ok: false, reason: `amount $${claims.amountUsd} exceeds per-booking cap $${perBooking}` };
+    if (claimedMicros <= 0n) return { ok: false, reason: "amount must be > 0" };
+    // A mandate whose limits cannot be read exactly (signed by an older or
+    // foreign issuer with sub-micro or exponent amounts) is refused, not
+    // approximated: there is no safe float fallback for a spend cap.
+    const totalMicros = usdToMicros(c.maxTotalUsd);
+    const perBookingMicros = c.maxPerBookingUsd === undefined ? totalMicros : usdToMicros(c.maxPerBookingUsd);
+    if (totalMicros === null || perBookingMicros === null) {
+      return { ok: false, reason: "mandate spend limits are not exact USD amounts" };
     }
-    const spent = this.spent.get(mandate.mandateId) ?? 0;
-    if (spent + claims.amountUsd > c.maxTotalUsd) {
-      return { ok: false, reason: `amount $${claims.amountUsd} exceeds remaining allowance $${(c.maxTotalUsd - spent).toFixed(2)}` };
+    if (claimedMicros > perBookingMicros) {
+      return {
+        ok: false,
+        reason: `amount $${formatMicros(claimedMicros)} exceeds per-booking cap $${formatMicros(perBookingMicros)}`,
+      };
+    }
+    const spent = this.spent.get(mandate.mandateId) ?? 0n;
+    if (spent + claimedMicros > totalMicros) {
+      return {
+        ok: false,
+        reason: `amount $${formatMicros(claimedMicros)} exceeds remaining allowance $${formatMicros(totalMicros - spent)}`,
+      };
     }
     if (c.mccAllowlist?.length && claims.mcc && !c.mccAllowlist.includes(claims.mcc)) {
       return { ok: false, reason: `mcc ${claims.mcc} not in mandate allowlist` };
@@ -454,17 +537,40 @@ export class AgentTrust {
       return { ok: false, reason: `source ${claims.source} not in mandate allowlist` };
     }
 
-    // 6. Replay: this exact token clears verification once.
-    if (!(await this.nonces.add(envelope.nonce))) return { ok: false, reason: "replayed booking token" };
+    // Reserve, still synchronously. A concurrent booking now sees this spend
+    // and this consumption before the nonce store gets a chance to yield.
+    this.spent.set(mandate.mandateId, spent + claimedMicros);
+    const consumesMandate = c.singleUse === true;
+    if (consumesMandate) this.consumed.add(mandate.mandateId);
+    const rollback = () => {
+      // Subtract rather than restore `spent`: other bookings may have
+      // reserved since, and theirs must survive this one being undone.
+      const now = this.spent.get(mandate.mandateId) ?? 0n;
+      this.spent.set(mandate.mandateId, now - claimedMicros);
+      if (consumesMandate) this.consumed.delete(mandate.mandateId);
+    };
 
-    // Commit.
-    this.spent.set(mandate.mandateId, spent + claims.amountUsd);
-    if (c.singleUse) this.consumed.add(mandate.mandateId);
+    // 6. Replay: this exact token clears verification once. A replay or a
+    //    store failure undoes the reservation; neither approves anything.
+    let fresh: boolean;
+    try {
+      fresh = await this.nonces.add(envelope.nonce);
+    } catch (e) {
+      rollback();
+      throw e;
+    }
+    if (!fresh) {
+      rollback();
+      return { ok: false, reason: "replayed booking token" };
+    }
+
+    const remaining = totalMicros - spent - claimedMicros;
     return {
       ok: true,
       agentKeyId: envelope.agentKeyId,
       mandateId: mandate.mandateId,
-      remainingUsd: Math.round((c.maxTotalUsd - spent - claims.amountUsd) * 100) / 100,
+      remainingUsd: Number(remaining) / Number(MICROS_PER_USD),
+      remainingUsdExact: formatMicros(remaining),
     };
   }
 
@@ -529,8 +635,20 @@ export class AgentTrust {
     if (Number.isNaN(iat) || iat - now > skewMs) return { ok: false, reason: "capability iat out of range" };
 
     // 5. Value ceiling.
-    if (expect.maxUsd != null && grant.maxUsd != null && grant.maxUsd > expect.maxUsd) {
-      return { ok: false, reason: `capability maxUsd $${grant.maxUsd} exceeds server ceiling $${expect.maxUsd}` };
+    if (grant.maxUsd != null && usdToMicros(grant.maxUsd) === null) {
+      return { ok: false, reason: "capability maxUsd is not an exact USD amount" };
+    }
+    if (expect.maxUsd != null && grant.maxUsd != null) {
+      const ceiling = usdToMicros(expect.maxUsd);
+      // A server ceiling that cannot be read exactly fails closed.
+      if (ceiling === null) return { ok: false, reason: "server maxUsd ceiling is not an exact USD amount" };
+      const granted = usdToMicros(grant.maxUsd)!;
+      if (granted > ceiling) {
+        return {
+          ok: false,
+          reason: `capability maxUsd $${formatMicros(granted)} exceeds server ceiling $${formatMicros(ceiling)}`,
+        };
+      }
     }
 
     // 6. Replay check (report before the burn so the reason names the attack).
