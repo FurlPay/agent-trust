@@ -283,3 +283,43 @@ test("capability ceilings compare exact amounts and fail closed on unreadable on
   assert.equal(fuzzy.ok, false);
   assert.throws(() => cap(0.1234567), /maxUsd/);
 });
+
+// ── property: the verifier agrees with an exact model ──────────────────────
+
+/** Deterministic PRNG so a failing seed can be replayed. */
+function prng(seed) {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+}
+
+test("property: sequential bookings are accepted exactly when an integer-cent model says they fit", async () => {
+  for (let seed = 1; seed <= 40; seed++) {
+    const rand = prng(seed);
+    const capCents = 1 + Math.floor(rand() * 5000);
+    const perCents = rand() < 0.5 ? undefined : 1 + Math.floor(rand() * capCents);
+    const s = setup({ maxTotalUsd: capCents / 100, ...(perCents ? { maxPerBookingUsd: perCents / 100 } : {}) });
+    let spent = 0n; // the model: plain integer cents, no library code
+    for (let i = 0; i < 30; i++) {
+      // Often book exactly what is left: landing ON the cap is where float
+      // error turned a legitimate booking into a refusal.
+      const left = capCents - Number(spent);
+      const cents = left > 0 && rand() < 0.35 ? left : 1 + Math.floor(rand() * Math.max(1, capCents / 4));
+      const fits = (perCents === undefined || cents <= perCents) && spent + BigInt(cents) <= BigInt(capCents);
+      const r = await s.book(cents / 100);
+      assert.equal(r.ok, fits, `seed ${seed} step ${i}: ${cents}c with ${spent}c of ${capCents}c spent`);
+      if (fits) spent += BigInt(cents);
+    }
+  }
+});
+
+test("property: concurrent bookings never spend past the cap", async () => {
+  for (let seed = 1; seed <= 20; seed++) {
+    const rand = prng(seed);
+    const capCents = 100 + Math.floor(rand() * 900);
+    const s = setup({ maxTotalUsd: capCents / 100 }, { nonceStore: slowNonceStore() });
+    const amounts = Array.from({ length: 25 }, () => 1 + Math.floor(rand() * 120));
+    const results = await Promise.all(amounts.map((c) => s.book(c / 100)));
+    const approved = amounts.reduce((sum, c, i) => sum + (results[i].ok ? c : 0), 0);
+    assert.ok(approved <= capCents, `seed ${seed}: approved ${approved}c over a ${capCents}c cap`);
+  }
+});

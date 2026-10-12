@@ -2,8 +2,12 @@
 // @furlpay/agent-trust — a Trusted-Agent-Protocol-aligned trust layer for
 // agentic payments.
 //
-// Visa's Trusted Agent Protocol (TAP, github.com/visa/trusted-agent-protocol)
-// moved to live production transactions in July 2026. Its core idea: every
+// Visa introduced the Trusted Agent Protocol (TAP,
+// github.com/visa/trusted-agent-protocol) in October 2025 with Cloudflare and
+// other partners. This comment previously said TAP "moved to live production
+// transactions in July 2026" — a claim the linked repository does not support
+// (it describes itself as a sample implementation) and which was wrong about
+// the date by roughly nine months. Its core idea: every
 // agent-initiated request carries a cryptographic proof of (1) WHO the agent
 // is, (2) THAT the user consented, and (3) WHAT the agent is allowed to do —
 // transmitted as RFC 9421 HTTP Message Signatures so merchants can separate
@@ -38,7 +42,8 @@
 // decremented on successful verification, so a mandate is a spend allowance,
 // not a reusable password.
 //
-// Zero dependencies — Ed25519 via node:crypto. The nonce/budget stores are
+// No runtime dependencies — Ed25519 via node:crypto. (`@types/node` is an
+// optional peer, for TypeScript consumers only.) The nonce/budget stores are
 // in-memory and correct within one process; back them with Redis for
 // multi-instance verifiers.
 // ---------------------------------------------------------------------------
