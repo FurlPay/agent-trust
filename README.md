@@ -61,8 +61,23 @@ const token = createBookingToken({
 
 // 3. Rail verifies the full chain before issuing a credential
 const decision = await trust.verifyBookingToken(token, { amountUsd: 320, mcc: "7011", source: "legacy" });
-// → { ok: true, agentKeyId: "ak_…", mandateId: "mnd_…", remainingUsd: 180 }
+// → { ok: true, agentKeyId: "ak_…", mandateId: "mnd_…", remainingUsd: 180, remainingUsdExact: "180.00" }
 ```
+
+### Amounts
+
+USD amounts are JSON numbers on the wire, but every limit check and every
+running total uses exact integer micro-dollars, never float arithmetic. An
+amount must be readable back exactly: at most 6 decimal places, finite,
+non-negative and below $1,000,000,000. Anything else is refused rather than
+rounded, including at issue time, so a mandate can never be signed for an
+amount the verifier would read differently. A mandate signed elsewhere with an
+amount outside those rules is refused at verification.
+
+Spend is reserved atomically with the cap check, so concurrent bookings cannot
+together exceed a mandate's cap or reuse a single-use mandate. Budgets live in
+the `AgentTrust` instance's memory: route all bookings for one mandate to one
+verifier.
 
 ### Gating the FurlPay travel MCP server
 
