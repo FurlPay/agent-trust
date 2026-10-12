@@ -4,10 +4,10 @@
 //
 // Visa introduced the Trusted Agent Protocol (TAP,
 // github.com/visa/trusted-agent-protocol) in October 2025 with Cloudflare and
-// other partners. This comment previously said TAP "moved to live production
-// transactions in July 2026" — a claim the linked repository does not support
-// (it describes itself as a sample implementation) and which was wrong about
-// the date by roughly nine months. Its core idea: every
+// other partners. On 2 July 2026 Visa announced live agent-executed purchases
+// across Europe, with merchant participation enabled through TAP and its
+// Agent Directory. The linked repository is Visa's sample implementation, not
+// the production service. Its core idea: every
 // agent-initiated request carries a cryptographic proof of (1) WHO the agent
 // is, (2) THAT the user consented, and (3) WHAT the agent is allowed to do —
 // transmitted as RFC 9421 HTTP Message Signatures so merchants can separate
